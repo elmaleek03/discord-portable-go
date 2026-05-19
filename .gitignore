@@ -1,0 +1,26 @@
+# Generated runtime data (kept out of git)
+/Discord/
+/DiscordData/
+/_Installer/
+/_Reg/
+/_state/
+/config.ini
+
+# Build artifacts
+/_src/cmd/launcher/app.ico
+/_src/cmd/updater/app.ico
+/_src/cmd/launcher/rsrc_amd64.syso
+/_src/cmd/updater/rsrc_amd64.syso
+
+# Go
+*.exe~
+*.test
+*.out
+vendor/
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
