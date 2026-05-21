@@ -98,6 +98,36 @@ func EnsureJunction(target, link string) error {
 	return MakeJunction(target, link)
 }
 
+// CleanDir removes every entry inside p but leaves p itself in place.
+// If p does not exist it is created. Reparse points found inside p are
+// unlinked rather than walked, so a junction inside the dir does not cause
+// us to wipe the link's real target. Errors on individual entries are
+// collected; the first one is returned but cleanup continues for the rest.
+func CleanDir(p string) error {
+	if p == "" {
+		return nil
+	}
+	if !FileExists(p) {
+		return os.MkdirAll(p, 0755)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	names, err := f.Readdirnames(-1)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, n := range names {
+		if rmErr := RemoveAll(filepath.Join(p, n)); rmErr != nil && firstErr == nil {
+			firstErr = rmErr
+		}
+	}
+	return firstErr
+}
+
 func isDirEmpty(p string) bool {
 	f, err := os.Open(p)
 	if err != nil {

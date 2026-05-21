@@ -28,7 +28,7 @@ runs, so a reboot does not reset Discord state.
 
 | File                    | Audience | Window                | Purpose                                                                      |
 | ----------------------- | -------- | --------------------- | ---------------------------------------------------------------------------- |
-| `Launch_Discord.exe`    | Clients  | None (GUI subsystem)  | Restores junctions + registry, launches Discord, exits.                      |
+| `Launch_Discord.exe`    | Clients  | None (GUI subsystem)  | Restores junctions + registry, wipes `DiscordData/`, launches Discord, exits.|
 | `Discord_Updater.exe`   | Admin    | Console + progress    | First-time install, then a 120 s self-update window for later runs.          |
 
 The two binaries are designed to be the only thing anyone runs.
@@ -86,8 +86,10 @@ When it closes, the portable install is ready.
 
 Users double-click `Launch_Discord.exe`. Nothing else.
 
-No console window appears. The launcher rebuilds both junctions, imports the
-registry, starts Discord, and exits.
+No console window appears. The launcher kills any running Discord, rebuilds
+both junctions, **wipes `DiscordData/` so every session starts clean (no
+login, no settings, no cache)**, imports the registry, starts Discord, and
+exits.
 
 ### 3. Periodic updates (admin)
 
@@ -118,7 +120,8 @@ binary you run and the state of the project root.
 
 - If `Discord/Update.exe` is missing -> exit 1 silently (admin must run the
   updater first).
-- Otherwise -> ensure junctions, import reg, start Discord, exit.
+- Otherwise -> kill any running Discord, ensure junctions, wipe
+  `DiscordData/` for a clean session, import reg, start Discord, exit.
 
 ## Building from source
 
