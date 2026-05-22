@@ -29,7 +29,7 @@ runs, so a reboot does not reset Discord state.
 | File                    | Audience | Window                | Purpose                                                                      |
 | ----------------------- | -------- | --------------------- | ---------------------------------------------------------------------------- |
 | `Launch_Discord.exe`    | Clients  | None (GUI subsystem)  | Restores junctions + registry, wipes `DiscordData/`, launches Discord, exits.|
-| `Discord_Updater.exe`   | Admin    | Console + progress    | Downloads DiscordSetup.exe and runs it through the portable junctions, every run. |
+| `Discord_Updater.exe`   | Admin    | Console + progress    | First-time install, then a 120 s self-update window for later runs.          |
 
 The two binaries are designed to be the only thing anyone runs.
 `Launch_Discord.exe` is intentionally silent (no console, no prompts, no
@@ -71,14 +71,12 @@ reboot is fine.
 1. Drop `discord-portable-go/` onto your portable volume.
 2. Double-click `Discord_Updater.exe`.
 3. Wait for the progress bar. It will:
-   - create `Discord/` and `DiscordData/` if missing,
-   - replace `%LOCALAPPDATA%\Discord` with a junction to `Discord/` and
-     `%APPDATA%\discord` with a junction to `DiscordData/`
-     (migrating any existing data first if the portable folders are empty),
    - download `DiscordSetup.exe`,
-   - run the installer silently; because the junctions are already in
-     place, Squirrel writes straight into `Discord/` and `DiscordData/`,
-   - kill the auto-launched Discord so the install dir unlocks,
+   - run the installer silently,
+   - copy the install into `Discord/`,
+   - replace `%LOCALAPPDATA%\Discord` with a junction to `Discord/`,
+   - create `DiscordData/` and replace `%APPDATA%\discord` with a junction
+     to it (migrating any existing data if `DiscordData/` is empty),
    - export `HKCU\SOFTWARE\Classes\Discord` to `_Reg\Discord.reg`,
    - delete Discord's autostart `Run` entry.
 
@@ -96,18 +94,15 @@ exits.
 ### 3. Periodic updates (admin)
 
 Run `Discord_Updater.exe` again on the admin schedule of your choice (manual,
-Task Scheduler, on logon, whatever). The flow is the same as first-time
-setup:
+Task Scheduler, on logon, whatever). It will:
 
-1. Stop any running Discord.
-2. Ensure both junctions still exist (`%LOCALAPPDATA%\Discord` -> `Discord\`,
-   `%APPDATA%\discord` -> `DiscordData\`).
-3. Download a fresh `DiscordSetup.exe` with a progress bar.
-4. Run the silent installer. Because the junctions are already in place,
-   every file Squirrel writes to `%LOCALAPPDATA%\Discord` lands in the
-   portable `Discord\` folder.
-5. Kill the installer-launched Discord so the install dir unlocks.
-6. Refresh the registry export and disable the autostart entry.
+1. Ensure both junctions still exist.
+2. Kill any running Discord.
+3. Launch Discord so its built-in Squirrel updater downloads the new version
+   into `Discord/`.
+4. Show a 120 second countdown bar (`Updating [==========    ] 60.0%  1:12 / 2:00`).
+5. Kill every Discord process when the timer hits zero.
+6. Refresh the registry export and exit.
 
 That's the entire update workflow. The terminal closes with the updater.
 
@@ -118,9 +113,11 @@ binary you run and the state of the project root.
 
 `Discord_Updater.exe`:
 
-- Always: kill Discord, ensure junctions, download `DiscordSetup.exe`,
-  run it silently, kill the installer-launched Discord, refresh the
-  registry export. Same flow on first install and on every later run.
+- If `Discord/Update.exe` is missing -> first-time setup mode (download,
+  silent install into a *clean* `%LOCALAPPDATA%\Discord`, then relocate
+  + junction).
+- Otherwise -> launch Discord, 120 s self-update window, kill all
+  Discord processes, refresh registry export.
 
 `Launch_Discord.exe`:
 
@@ -163,7 +160,7 @@ _src/
   cmd/
     launcher/main.go            silent client launcher
     launcher/app.manifest       Win32 manifest (DPI / UTF-8 / asInvoker)
-    updater/main.go             unified install/update flow (download DiscordSetup.exe + run via junction)
+    updater/main.go             first-time setup + 120s update window
     updater/app.manifest        Win32 manifest
 ```
 
@@ -174,15 +171,23 @@ _src/
 - Junctions need NTFS. They do not work on FAT32 / exFAT volumes.
 - The launcher does not require admin. Junctions are created with `mklink /J`
   which works for the current user.
-- The updater downloads and runs `DiscordSetup.exe -s` on every
-  invocation rather than relying on Discord's in-app Squirrel updater.
-  The portable junctions (`%LOCALAPPDATA%\Discord` -> `Discord\`,
-  `%APPDATA%\discord` -> `DiscordData\`) make the installer write
-  straight into the portable folders, so no manual relocation step is
-  needed.
+- The 120 second update window is a fixed wait. If your network is slow you
+  can extend it by editing the `sleepSeconds` constant in
+  `_src/cmd/updater/main.go` and rebuilding. The countdown is rendered as
+  `m:ss / m:ss` rather than bytes (the older versions misrendered it as
+  e.g. `0 B / 120 B @ 1 B/s` because the byte-progress writer was reused
+  for the timer).
 - First run migrates anything currently in `%APPDATA%\discord` into
   `DiscordData/` if `DiscordData/` is empty, so an existing logged-in user
   does not have to log in again on the portable copy.
+- The two-path updater design (clean install vs. self-update window) is
+  intentional. Squirrel's silent installer will not write `Update.exe`
+  into `%LOCALAPPDATA%\Discord` when that path is already a junction
+  pointing at a populated portable folder; it sees an "existing install"
+  and skips. So first-time setup runs on a *real, empty*
+  `%LOCALAPPDATA%\Discord`, then relocates + junctions afterward, while
+  later runs leave the junctions alone and lean on Discord's in-app
+  Squirrel updater for incremental updates.
 
 ## License
 

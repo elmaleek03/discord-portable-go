@@ -1,37 +1,36 @@
 // Discord_Updater.exe
 // Server-side update tool with terminal progress.
 //
-// Behavior (single unified flow, runs the same on first install and
-// every subsequent update):
+// Behavior:
+//   - On first run (no Discord\Update.exe yet): downloads DiscordSetup.exe with a
+//     progress bar, runs the silent installer, copies it into the portable
+//     Discord\ folder, builds the junctions, exports the registry key.
+//   - On subsequent runs: ensures junctions, opens Discord so Squirrel can
+//     self-update, sleeps 120 seconds with a m:ss countdown bar, then kills
+//     every Discord process and exits (the terminal closes with it).
 //
-//   1. Stop any running Discord so its files unlock.
-//   2. Ensure %LOCALAPPDATA%\Discord -> <root>\Discord       junction.
-//      Ensure %APPDATA%\discord      -> <root>\DiscordData   junction.
-//      On first run, if a real Discord install already exists at
-//      %LOCALAPPDATA%\Discord, EnsureJunction migrates it into the
-//      portable folder before swapping in the junction.
-//   3. Download a fresh DiscordSetup.exe with a progress bar.
-//   4. Run the installer with `-s`. Because the junctions are in place,
-//      the Squirrel installer writes straight into <root>\Discord, so
-//      no manual relocation is needed. The installer auto-launches
-//      Discord when it finishes.
-//   5. Kill the installer-launched Discord so the install dir unlocks.
-//   6. Re-export HKCU\SOFTWARE\Classes\Discord and scrub the autostart
-//      Run entry the installer may have re-added.
-//
-// This replaces the older "open Discord and wait 120 s for Squirrel
-// to self-update" approach, which was unreliable: Squirrel does not
-// always run an update check on each launch, so most update cycles
-// did nothing and just re-opened the app.
+// The two-path design is intentional. Squirrel's silent installer only
+// writes Update.exe to %LOCALAPPDATA%\Discord when that folder is a real,
+// empty directory; if a junction is already in place pointing to a
+// populated portable Discord\ folder, Squirrel detects an "existing
+// install" and skips, leaving Update.exe missing. So first-time setup
+// installs into the real %LOCALAPPDATA%\Discord, *then* relocates +
+// junctions, while later runs leave the junctions alone and lean on
+// Discord's in-app Squirrel updater for incremental updates.
 
 package main
 
 import (
 	"discord-portable/common"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"time"
 )
+
+const sleepSeconds = 120
 
 func main() {
 	p := common.Resolve()
@@ -41,43 +40,47 @@ func main() {
 	fmt.Println("=========================================")
 	fmt.Println()
 
-	if err := run(p); err != nil {
+	// Keep portable folders ready before anything else touches them.
+	if err := os.MkdirAll(p.DiscordDir, 0755); err != nil {
+		die(err)
+	}
+	if err := os.MkdirAll(p.DataDir, 0755); err != nil {
+		die(err)
+	}
+	if err := os.MkdirAll(p.StateDir, 0755); err != nil {
 		die(err)
 	}
 
-	fmt.Println()
-	fmt.Println("[+] Update complete. Closing in 5s...")
-	time.Sleep(5 * time.Second)
-}
-
-func run(p common.Paths) error {
-	// Make sure every portable folder we care about exists before any
-	// step touches it.
-	for _, d := range []string{p.DiscordDir, p.DataDir, p.StateDir, p.InstallerDir} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			return err
+	if !common.FileExists(p.UpdateExe) {
+		if err := firstTimeSetup(p); err != nil {
+			die(err)
 		}
+		fmt.Println()
+		fmt.Println("[+] Setup complete. Closing in 5s...")
+		time.Sleep(5 * time.Second)
+		return
 	}
 
-	fmt.Println("[1/6] Stopping any running Discord...")
+	// Subsequent runs: trigger Discord's own self-updater by launching it.
+	if err := refreshExisting(p); err != nil {
+		die(err)
+	}
+}
+
+func firstTimeSetup(p common.Paths) error {
+	fmt.Println("[1/6] First run detected. Stopping any Discord processes...")
 	common.KillDiscord()
 	time.Sleep(1 * time.Second)
 
-	// Junctions go up before the installer runs so the installer's
-	// writes to %LOCALAPPDATA%\Discord and %APPDATA%\discord land in
-	// our portable folders. EnsureJunction handles three cases:
-	//   - link missing               -> create junction
-	//   - link is real folder, empty -> migrate then swap
-	//   - link is already a junction -> leave alone
-	fmt.Println("[2/6] Ensuring portable junctions...")
-	if err := common.EnsureJunction(p.DiscordDir, p.LocalAppDiscord); err != nil {
-		return fmt.Errorf("install junction: %w", err)
-	}
-	if err := common.EnsureJunction(p.DataDir, p.RoamingDiscord); err != nil {
-		return fmt.Errorf("data junction: %w", err)
+	fmt.Println("[2/6] Cleaning %LOCALAPPDATA%\\Discord ...")
+	if common.FileExists(p.LocalAppDiscord) {
+		_ = common.RemoveAll(p.LocalAppDiscord)
 	}
 
 	fmt.Println("[3/6] Downloading Discord installer...")
+	if err := os.MkdirAll(p.InstallerDir, 0755); err != nil {
+		return err
+	}
 	if common.FileExists(p.InstallerExe) {
 		_ = os.Remove(p.InstallerExe)
 	}
@@ -85,35 +88,151 @@ func run(p common.Paths) error {
 		return fmt.Errorf("download: %w", err)
 	}
 
-	// DiscordSetup.exe with `-s` is fully silent. It still spawns
-	// Discord at the end (Squirrel's standard post-install hook), so
-	// we kill that in the next step. WaitForLocalAppDiscord is a
-	// safety net for the rare case where the installer returns before
-	// Update.exe is fully on disk.
-	fmt.Println("[4/6] Running installer (silent, can take 30-60s)...")
+	fmt.Println("[4/6] Running installer (silent). This can take up to a minute...")
 	_ = common.RunInstallerSilent(p.InstallerExe)
-	if err := common.WaitForLocalAppDiscord(p, 120*time.Second); err != nil {
+	if err := common.WaitForLocalAppDiscord(p, 90*time.Second); err != nil {
 		return err
 	}
 
-	fmt.Println("[5/6] Stopping installer-launched Discord...")
-	common.KillDiscord()
-	time.Sleep(2 * time.Second)
-	// Second sweep covers Squirrel children that respawned during the
-	// first taskkill (Discord.exe, Update.exe, DiscordCrashHandler.exe
-	// like to relaunch each other once on close).
-	common.KillDiscord()
+	fmt.Println("[5/6] Building portable folder + junctions...")
+	// Move the freshly installed files into our portable folder, then point
+	// %LOCALAPPDATA%\Discord at it.
+	if err := relocateInstall(p); err != nil {
+		return err
+	}
+	if err := common.EnsureJunction(p.DataDir, p.RoamingDiscord); err != nil {
+		return fmt.Errorf("data junction: %w", err)
+	}
 
-	fmt.Println("[6/6] Refreshing registry export and disabling autostart...")
+	fmt.Println("[6/6] Exporting registry and disabling autostart...")
 	_ = common.RegExport(`HKEY_CURRENT_USER\SOFTWARE\Classes\Discord`, p.RegFile)
 	_ = common.RegDeleteRun("Discord")
 
 	common.WriteTimestamp(p.LastUpdate)
-
 	if !common.FileExists(p.UpdateExe) {
-		return fmt.Errorf("Update.exe missing after install at %s", p.UpdateExe)
+		return fmt.Errorf("Update.exe still missing after setup")
 	}
 	return nil
+}
+
+// relocateInstall copies %LOCALAPPDATA%\Discord into <root>\Discord and
+// replaces the original with a junction pointing back.
+func relocateInstall(p common.Paths) error {
+	src := p.LocalAppDiscord
+	if !common.FileExists(src) {
+		return fmt.Errorf("install source missing: %s", src)
+	}
+
+	// Count bytes for the progress bar.
+	var total int64
+	_ = filepath.Walk(src, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	pw := common.NewProgress("Copying ", total)
+
+	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(p.DiscordDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(dst, info.Mode())
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return err
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		buf := make([]byte, 256*1024)
+		for {
+			n, rerr := in.Read(buf)
+			if n > 0 {
+				if _, werr := out.Write(buf[:n]); werr != nil {
+					return werr
+				}
+				pw.Current += int64(n)
+				pw.Draw(false)
+			}
+			if rerr != nil {
+				if errors.Is(rerr, io.EOF) {
+					return nil
+				}
+				return rerr
+			}
+		}
+	})
+	pw.Done()
+	if err != nil {
+		return err
+	}
+
+	if err := common.RemoveAll(src); err != nil {
+		return err
+	}
+	return common.MakeJunction(p.DiscordDir, src)
+}
+
+func refreshExisting(p common.Paths) error {
+	fmt.Println("[1/4] Ensuring junctions...")
+	if err := common.EnsureJunction(p.DiscordDir, p.LocalAppDiscord); err != nil {
+		return fmt.Errorf("install junction: %w", err)
+	}
+	if err := common.EnsureJunction(p.DataDir, p.RoamingDiscord); err != nil {
+		return fmt.Errorf("data junction: %w", err)
+	}
+	common.EnsureRegistry(p)
+
+	fmt.Println("[2/4] Stopping any running Discord...")
+	common.KillDiscord()
+	time.Sleep(2 * time.Second)
+
+	fmt.Printf("[3/4] Launching Discord to self-update (%ds window)...\n", sleepSeconds)
+	if err := common.LaunchDiscord(p); err != nil {
+		return fmt.Errorf("launch: %w", err)
+	}
+	countdown(sleepSeconds)
+
+	fmt.Println()
+	fmt.Println("[4/4] Closing all Discord processes...")
+	common.KillDiscord()
+	time.Sleep(1 * time.Second)
+	common.KillDiscord()
+
+	common.WriteTimestamp(p.LastUpdate)
+
+	// Re-export the registry in case Discord rewrote it during this session.
+	_ = common.RegExport(`HKEY_CURRENT_USER\SOFTWARE\Classes\Discord`, p.RegFile)
+	_ = common.RegDeleteRun("Discord")
+
+	fmt.Println()
+	fmt.Println("[+] Update window finished. Closing...")
+	time.Sleep(2 * time.Second)
+	return nil
+}
+
+func countdown(seconds int) {
+	pw := common.NewCountdown("Updating", int64(seconds))
+	for i := 1; i <= seconds; i++ {
+		time.Sleep(1 * time.Second)
+		pw.Current = int64(i)
+		pw.Draw(true)
+	}
+	pw.Done()
 }
 
 func die(err error) {
