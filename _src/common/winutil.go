@@ -200,11 +200,21 @@ func RegDeleteRun(name string) error {
 }
 
 // LaunchDiscord starts Discord through Update.exe and detaches.
+//
+// Do NOT set HideWindow:true here. SysProcAttr.HideWindow translates to
+// STARTF_USESHOWWINDOW + wShowWindow=SW_HIDE in the child's STARTUPINFO,
+// which Update.exe forwards to Discord.exe via --processStart. Discord
+// reads nCmdShow from there to decide how to bring up its main window;
+// with HideWindow set, it boots tray-only -- the process is fully
+// alive but the window stays minimized to the tray until the user
+// right-clicks the tray icon and picks "Open Discord". Leaving
+// SysProcAttr.HideWindow at its zero value lets the child use
+// SW_SHOWDEFAULT and open normally. DETACHED_PROCESS alone is enough
+// to fully unhook the child from us so we can exit immediately.
 func LaunchDiscord(p Paths) error {
 	cmd := exec.Command(p.UpdateExe, "--processStart", "Discord.exe")
 	cmd.Dir = filepath.Dir(p.UpdateExe)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
 		CreationFlags: 0x00000008, // DETACHED_PROCESS
 	}
 	if err := cmd.Start(); err != nil {
