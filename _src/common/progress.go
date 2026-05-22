@@ -7,12 +7,25 @@ import (
 	"time"
 )
 
+// Unit selects how Current/Total are rendered in the progress bar.
+type Unit int
+
+const (
+	// UnitBytes renders Current/Total as "1.2 MiB / 5.0 MiB @ 800 KiB/s".
+	UnitBytes Unit = iota
+	// UnitSeconds renders Current/Total as "0:42 / 2:00" with no rate
+	// suffix. Used for fixed-time countdowns where Current is ticked
+	// once per second.
+	UnitSeconds
+)
+
 // ProgressWriter renders a single-line progress bar to stdout.
 type ProgressWriter struct {
 	Total   int64
 	Current int64
 	Label   string
 	Width   int
+	Unit    Unit
 
 	startedAt  time.Time
 	lastDraw   time.Time
@@ -24,7 +37,17 @@ type ProgressWriter struct {
 func NewProgress(label string, total int64) *ProgressWriter {
 	now := time.Now()
 	return &ProgressWriter{
-		Total: total, Label: label, Width: 30,
+		Total: total, Label: label, Width: 30, Unit: UnitBytes,
+		startedAt: now, lastSpeedT: now,
+	}
+}
+
+// NewCountdown returns a progress writer pre-configured for a
+// fixed-duration countdown (Current is ticked in seconds).
+func NewCountdown(label string, seconds int64) *ProgressWriter {
+	now := time.Now()
+	return &ProgressWriter{
+		Total: seconds, Label: label, Width: 30, Unit: UnitSeconds,
 		startedAt: now, lastSpeedT: now,
 	}
 }
@@ -64,20 +87,42 @@ func (p *ProgressWriter) draw(force bool) {
 	}
 	bar := strings.Repeat("=", filled) + strings.Repeat(" ", p.Width-filled)
 
-	if p.Total > 0 {
-		fmt.Printf("\r  %s [%s] %5.1f%%  %s / %s  @ %s/s     ",
+	switch p.Unit {
+	case UnitSeconds:
+		fmt.Printf("\r  %s [%s] %5.1f%%  %s / %s     ",
 			p.Label, bar, pct*100,
-			HumanBytes(p.Current), HumanBytes(p.Total),
-			HumanBytes(int64(p.speed)))
-	} else {
-		fmt.Printf("\r  %s  %s  @ %s/s     ",
-			p.Label, HumanBytes(p.Current), HumanBytes(int64(p.speed)))
+			formatDuration(p.Current), formatDuration(p.Total))
+	default:
+		if p.Total > 0 {
+			fmt.Printf("\r  %s [%s] %5.1f%%  %s / %s  @ %s/s     ",
+				p.Label, bar, pct*100,
+				HumanBytes(p.Current), HumanBytes(p.Total),
+				HumanBytes(int64(p.speed)))
+		} else {
+			fmt.Printf("\r  %s  %s  @ %s/s     ",
+				p.Label, HumanBytes(p.Current), HumanBytes(int64(p.speed)))
+		}
 	}
 }
 
 func (p *ProgressWriter) Done() {
 	p.draw(true)
 	fmt.Println()
+}
+
+// formatDuration renders a number of seconds as "m:ss" (or "h:mm:ss"
+// when an hour or more).
+func formatDuration(seconds int64) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	s := seconds % 60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%d:%02d", m, s)
 }
 
 func HumanBytes(n int64) string {
